@@ -1,0 +1,10 @@
+accelerate
+datasets
+nltk 
+pybind11 
+deepspeed
+deepspeed[autotune]
+flask-restful
+transformers
+yq
+tensorboard

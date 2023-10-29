@@ -45,7 +45,7 @@ def add_text_generate_args(parser):
 
 if __name__ == "__main__":
     initialize_megatron(extra_args_provider=add_text_generate_args,
-                        args_defaults={'tokenizer_type': 'GPT2BPETokenizer',
+                        args_defaults={'tokenizer_type': 'Llama2Tokenizer',
                                        'no_load_rng': True,
                                        'no_load_optim': True})
 
