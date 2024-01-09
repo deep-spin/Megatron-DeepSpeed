@@ -2,7 +2,10 @@
 
 """GPT-2 model."""
 
+from functools import partial
+
 import torch
+import entmax
 
 from megatron import get_args
 from megatron.core import mpu, tensor_parallel, sequence_parallel
@@ -24,21 +27,22 @@ try:
 except ImportError:
     MixedFusedRMSNorm = None
 
-try:         
+try:
     from deepspeed.checkpoint import (
         VOCABULARY_PARAMETER_PATTERNS,
         PIPELINE_REPLICATED_PARAMETER_PATTERNS,
         TP_REPLICATED_PARAMETER_PATTERNS,
         PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
     )
-    DS_UNIVERSAL_CHECKPOINT_INFO = True 
+    DS_UNIVERSAL_CHECKPOINT_INFO = True
 except ImportError:
-    DS_UNIVERSAL_CHECKPOINT_INFO = False  
+    DS_UNIVERSAL_CHECKPOINT_INFO = False
 
 
 def post_language_model_processing(lm_output, labels, logit_weights,
                                    parallel_output,
-                                   fp16_lm_cross_entropy):
+                                   fp16_lm_cross_entropy,
+                                   loss_function, alpha, topk, n_iter):
 
     # Output. Format [s b h]
     output = parallel_lm_logits(
@@ -49,7 +53,9 @@ def post_language_model_processing(lm_output, labels, logit_weights,
     if labels is None:
         # [s b h] => [b s h]
         return output.transpose(0,1).contiguous()
-    else:
+
+    if loss_function == "cross_entropy":
+        # cross entropy
         # [b s] => [s b]
         labels = labels.transpose(0,1).contiguous()
         cross_entropy = sequence_parallel.vocab_sequence_parallel_cross_entropy if mpu.get_sequence_parallel_world_size() > 1 \
@@ -62,6 +68,19 @@ def post_language_model_processing(lm_output, labels, logit_weights,
 
         # [s b] => [b, s]
         loss = loss.transpose(0,1).contiguous()
+    else:
+        # now: the loss function is "entmax15", "sparsemax", or "entmax_bisect"
+        loss_funcs = {
+            "entmax15": partial(entmax.entmax15_loss, k=topk),
+            "sparsemax": partial(entmax.sparsemax_loss, k=topk),
+            "entmax_bisect": partial(entmax.entmax_bisect_loss, alpha=alpha, n_iter=n_iter)
+        }
+        f = loss_funcs[loss_function]
+
+        b, s = labels.size()
+        vocab_size = output.size(-1)
+        loss = f(output.float().view(-1, vocab_size), labels.view(-1))
+        loss = loss.view(b, s)
         return loss
 
 
@@ -84,6 +103,10 @@ class GPTModel(MegatronModule):
         self.fp16_lm_cross_entropy = args.fp16_lm_cross_entropy
         self.return_moe_loss = return_moe_loss
         self.untie_embeddings_and_output_weights = args.untie_embeddings_and_output_weights
+        self.loss_function = args.loss_function
+        self.entmax_alpha = args.entmax_alpha
+        self.entmax_topk = args.entmax_topk
+        self.entmax_n_iter = args.entmax_n_iter
 
         self.language_model, self._language_model_key = get_language_model(
             config=config,
@@ -139,7 +162,11 @@ class GPTModel(MegatronModule):
                 lm_output, labels,
                 self.language_model.output_layer.weight if self.untie_embeddings_and_output_weights else self.shared_embedding_or_output_weight(),
                 self.parallel_output,
-                self.fp16_lm_cross_entropy)
+                self.fp16_lm_cross_entropy,
+                self.loss_function,
+                self.entmax_alpha,
+                self.entmax_topk,
+                self.entmax_n_iter)
 
         return lm_output, moe_losses if self.return_moe_loss else lm_output
 
@@ -210,7 +237,7 @@ class GPTModel(MegatronModule):
             ]
 
         return info
-    
+
 def CrossEntropy(output, labels):
     labels, loss_mask = labels[0], labels[1]
 

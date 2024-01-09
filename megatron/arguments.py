@@ -83,7 +83,7 @@ def validate_args(args):
     if args.no_pipeline_parallel:
         assert args.pipeline_model_parallel_size == 1, \
             "pipeline_model_parallel_size must be 1 if pipeline parallel is disabled"
-        
+
     if args.ds_sequence_parallel_size > 1:
         assert version.parse(deepspeed.__version__) >= version.parse("0.10.2"), "sequence parallelism requires DeepSpeed version 0.10.2+"
 
@@ -432,6 +432,10 @@ def validate_args(args):
             assert not args.mos, 'GQA currently does not support args.mos'
             assert not args.kd, 'GQA currently does not support args.kd'
 
+    # entmax loss
+    if args.loss_function != "cross_entropy":
+        assert not args.fp16_lm_cross_entropy, "entmax loss only supports fp32"
+
     # Print arguments.
     _print_args("arguments", args)
     retro_args = get_retro_args()
@@ -632,7 +636,7 @@ def _add_network_size_args(parser):
     group.add_argument('--apply-layernorm-1p', action='store_true',
                        help='Adjust LayerNorm weights such that they are centered '
                        'around zero. This improves numerical stability.')
-    group.add_argument('--disable-mem-efficient-ln', action='store_false', 
+    group.add_argument('--disable-mem-efficient-ln', action='store_false',
                        help='Disable the memory-efficient fused LayerNorm optimization '
                        'introduced in https://github.com/NVIDIA/apex/pull/1715')
     group.add_argument('--apply-residual-connection-post-layernorm',
@@ -848,7 +852,7 @@ def _add_training_args(parser):
                        'training runs.')
     group.add_argument('--random-ltd',
                        action='store_true',
-                       help='enable random layer token drop')    
+                       help='enable random layer token drop')
     group.add_argument('--log-interval', type=int, default=100,
                        help='Report loss and timing interval.')
     group.add_argument('--exit-interval', type=int, default=None,
@@ -940,6 +944,15 @@ def _add_training_args(parser):
                        dest='gradient_accumulation_fusion')
     group.add_argument('--use-dataset-only', type=bool, required=False, default=False,
                        help='If set to True, only use the megatron dataset for external trainer ')
+    group.add_argument('--loss-function', default='cross_entropy',
+                       choices=['cross_entropy', 'entmax15', 'sparsemax', 'entmax_bisect'],
+                       help='Loss function for model training')
+    group.add_argument('--entmax-alpha', type=float, default=1.5,
+                       help='Entmax alpha for entmax_bisect (unused otherwise)')
+    group.add_argument('--entmax-topk', type=int, default=512,
+                       help='Top k for computation of exact entmax loss (for entmax15 and sparsemax)')
+    group.add_argument('--entmax-n-iter', type=int, default=30,
+                       help='Number of bisection interations for entmax_bisect')
     return parser
 
 
@@ -1034,7 +1047,7 @@ def _add_checkpointing_args(parser):
     group.add_argument('--no-load-rng', action='store_true', default=None,
                        help='Do not load rng state when loading checkpoint.')
     group.add_argument('--no-load-lr-state', action='store_true',
-                       help='Do not load lr state when loading checkpoint.')   
+                       help='Do not load lr state when loading checkpoint.')
     group.add_argument('--finetune', action='store_true',
                        help='Load model for finetuning. Do not load optimizer '
                        'or rng state from checkpoint and set iteration to 0. '
@@ -1210,7 +1223,7 @@ def _add_data_args(parser):
                        'form: dataset1-weight dataset1-path dataset2-weight '
                        'dataset2-path ...')
     group.add_argument('--multiple-valid-sets', action='store_true',
-                       help='multiple separated validation steps')            
+                       help='multiple separated validation steps')
     group.add_argument('--test-data-path', nargs='*', default=None,
                        help='Path to the test dataset. Accepted format:'
                        '1) a single data path, 2) multiple datasets in the'
@@ -1490,15 +1503,15 @@ def _add_activation_checkpoint_args(parser):
 def _add_distillation_args(parser):
     group = parser.add_argument_group('Knowledge distillation',
                                       'Distillation Configurations')
-    
+
     group.add_argument('--num-layers-teacher', type=int, default=None,
-                       help='Number of the teacher transformer layers.')                  
+                       help='Number of the teacher transformer layers.')
     group.add_argument('--num-experts-teacher', type=int, nargs='+', default=[1,],
                         help='number of teacher experts list, MoE related.')
     group.add_argument('--hidden-size-teacher', type=int, default=None,
                        help='Tansformer teacher hidden size.')
     group.add_argument('--num-attention-heads-teacher', type=int, default=None,
-                       help='Number of teacher transformer attention heads.') 
+                       help='Number of teacher transformer attention heads.')
 
     group.add_argument('--mos', action='store_true',
                        help='Enable Mixture-of-Students via knolwedge distillation.')
@@ -1509,7 +1522,7 @@ def _add_distillation_args(parser):
     group.add_argument('--kd-temp', default=1.0, type=float)
     group.add_argument('--reset-iteration', action='store_true',
                     help='Reset the iteration count.')
-    
+
     group.add_argument('--load-teacher', type=str, default=None,
                        help='Directory containing a teacher model checkpoint.')
 
