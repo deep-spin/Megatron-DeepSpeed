@@ -28,6 +28,7 @@ import subprocess
 from torch import nn
 import torch.nn.functional as F
 
+
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
 
@@ -36,7 +37,7 @@ def model_provider(pre_process=True, post_process=True):
 
     args = get_args()
     config = core_transformer_config_from_args(args)
-    with deepspeed.zero.Init(data_parallel_group=mpu.get_data_parallel_group(),
+    with deepspeed.zero.Init(sequence_data_parallel_group=mpu.get_sequence_data_parallel_group(),
                              remote_device=None if args.remote_device == 'none' else args.remote_device,
                              config_dict_or_path=args.deepspeed_config,
                              enabled=args.zero_stage == 3,
@@ -117,12 +118,35 @@ def get_batch(data_iterator):
     tokens = tokens_[:, :-1].contiguous()
 
     # Get the masks and postition ids.
+    skip_mask = args.use_flash_attn or args.use_flash_attn_triton
     attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
         tokens,
         tokenizer.eod,
         args.reset_position_ids,
         args.reset_attention_mask,
-        args.eod_mask_loss)
+        args.eod_mask_loss,
+        skip_mask)
+
+    # For DS's sequence parallel
+    seq_parallel_world_size = mpu.get_sequence_parallel_world_size()
+    seq_parallel_world_rank = mpu.get_sequence_parallel_rank()
+
+    # For Megatron's sequence parallel
+    if args.sequence_parallel:
+        seq_parallel_world_size = mpu.get_tensor_model_parallel_world_size()
+        seq_parallel_world_rank = mpu.get_tensor_model_parallel_rank()
+    seq_length = tokens.size(1)
+
+    assert seq_length % seq_parallel_world_size == 0
+    sub_seq_length = seq_length // seq_parallel_world_size
+    sub_seq_start = seq_parallel_world_rank * sub_seq_length
+    sub_seq_end = (seq_parallel_world_rank + 1) * sub_seq_length
+
+    tokens = tokens[:, sub_seq_start:sub_seq_end]
+    position_ids = position_ids[:, sub_seq_start:sub_seq_end]
+    # For DS's sequence parallel
+    if mpu.get_sequence_parallel_world_size() > 1:
+        labels = labels[:, sub_seq_start:sub_seq_end]
 
     return tokens, labels, loss_mask, attention_mask, position_ids
 
@@ -299,6 +323,7 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
         skip_warmup=(not args.mmap_warmup),
         train_data_prefix=args.train_data_path,
         valid_data_prefix=args.valid_data_path,
+        multiple_valid_sets=args.multiple_valid_sets,
         test_data_prefix=args.test_data_path,
         data_cache_path=args.data_cache_path)
     print_rank_0("> finished creating GPT datasets ...")
@@ -339,5 +364,4 @@ if __name__ == "__main__":
              model_provider,
              ModelType.encoder_or_decoder,
              forward_step,
-             args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
              data_post_process=data_post_process)

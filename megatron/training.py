@@ -11,6 +11,8 @@ import json
 _TRAIN_START_TIME = time.time()
 import torch
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
+from collections.abc import Mapping
+
 
 from megatron import get_args
 from megatron import get_signal_handler
@@ -50,12 +52,37 @@ from deepspeed.runtime.data_pipeline.data_routing.helper import convert_to_rando
 from megatron.model.transformer import ParallelTransformerLayer
 from deepspeed.runtime.config import DeepSpeedConfig
 
+from deepspeed import comm as dist
+
+try:
+    import wandb
+except (ImportError, ModuleNotFoundError):
+    wandb = None
+
+
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
     torch.distributed.barrier()
     time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print_rank_0('[' + string + '] datetime: {} '.format(time_str))
 
+'''
+Since v0.9.0, deepspeed.initialize() has forbidden simultaneous setting of args.deepspeed_config (Path) and ds_config dict.
+So, we use ds_config dict which is the more flexible option. 
+'''
+def _create_ds_config_dict():
+    args = get_args()
+    with open(args.deepspeed_config, 'r', encoding='utf-8') as config_file:
+        ds_config_dict = json.load(config_file)
+    
+    if args.universal_checkpoint:
+        ds_config_dict["checkpoint"] = {"load_universal": True}
+
+    # Clear config path
+    args.deepspeed_config = None 
+
+    return ds_config_dict
+    
 
 def pretrain(train_valid_test_dataset_provider,
              model_provider,
@@ -117,19 +144,17 @@ def pretrain(train_valid_test_dataset_provider,
     timers = get_timers()
 
     if args.deepspeed:
-        # args.deepspeed_configuration = json.load(
-        #     open(args.deepspeed_config, 'r', encoding='utf-8'))
-        args.deepspeed_configuration = DeepSpeedConfig(args.deepspeed_config)._param_dict
-        if "curriculum_learning" in args.deepspeed_configuration and \
-            "enabled" in args.deepspeed_configuration["curriculum_learning"]:
-            args.curriculum_learning_legacy = args.deepspeed_configuration[ \
+        args.deepspeed_config_dict = _create_ds_config_dict()
+        if "curriculum_learning" in args.deepspeed_config_dict and \
+            "enabled" in args.deepspeed_config_dict["curriculum_learning"]:
+            args.curriculum_learning_legacy = args.deepspeed_config_dict[ \
                 "curriculum_learning"]["enabled"]
         if args.curriculum_learning_legacy and not args.no_pipeline_parallel:
             from deepspeed.runtime.data_pipeline.curriculum_scheduler \
                 import CurriculumScheduler
             args.curriculum_scheduler = CurriculumScheduler( \
-                args.deepspeed_configuration["curriculum_learning"])
-        if "compression_training" in args.deepspeed_configuration:
+                args.deepspeed_config_dict["curriculum_learning"])
+        if "compression_training" in args.deepspeed_config_dict:
             args.compression_training = True
 
     # Model, optimizer, and learning rate.
@@ -205,7 +230,7 @@ def pretrain(train_valid_test_dataset_provider,
         print_datetime('after training is done')
         # Clean the model
         if args.compression_training:
-            model = [redundancy_clean(model[0], args.deepspeed_config, mpu)]
+            model = [redundancy_clean(model[0], args.deepspeed_config_dict, mpu)]
 
         if args.save and iteration != 0:
             save_checkpoint(iteration, model, optimizer, opt_param_scheduler)
@@ -228,6 +253,7 @@ def pretrain(train_valid_test_dataset_provider,
                                    test_data_iterator, model,
                                    iteration, process_non_loss_data_func, config,
                                    verbose=True, write_to_tensorboard=not args.skip_train, test=True)
+    return model
 
 
 def update_train_iters(args):
@@ -461,16 +487,13 @@ def load_model_weights_only(model_provider_func):
     lr_scheduler = None
 
     if args.deepspeed:
-        #with open(args.deepspeed_config, 'r') as fd:
-        #    ds_config = json.load(fd)
-        ds_config = DeepSpeedConfig(args.deepspeed_config)._params_dict
         # When loading just the model weights, ZeRO can be disabled.
-        if 'zero_optimization' in ds_config:
-            del ds_config['zero_optimization']
+        if 'zero_optimization' in args.deepspeed_config_dict:
+            del args.deepspeed_config_dict['zero_optimization']
 
         model, optimizer, _, lr_scheduler = deepspeed.initialize(
             model=model[0],
-            config=ds_config
+            config=args.deepspeed_config_dict
         )
 
         assert not isinstance(model, deepspeed.PipelineEngine), \
@@ -506,7 +529,8 @@ def setup_model_and_optimizer(model_provider_func,
         model, _, _, _ = deepspeed.initialize(
                 model=model[0],
                 args=args,
-                mpu=mpu if args.no_pipeline_parallel else None
+                mpu=mpu if args.no_pipeline_parallel else None,
+                config=args.deepspeed_config_dict,
             )
         model = [model]
         if args.load is not None:
@@ -520,10 +544,11 @@ def setup_model_and_optimizer(model_provider_func,
         model, _, _, _ = deepspeed.initialize(
             model=model[0],
             args=args,
-            mpu=mpu if args.no_pipeline_parallel else None
+            mpu=mpu if args.no_pipeline_parallel else None,
+            config=args.deepspeed_config_dict,
         )
         model = [model]
-        model = [init_compression(model[0].module, args.deepspeed_config, mpu)]
+        model = [init_compression(model[0].module, args.deepspeed_config_dict, mpu)]
 
     unwrapped_model = unwrap_model(model,
                                    (torchDDP, LocalDDP, Float16Module))
@@ -574,7 +599,8 @@ def setup_model_and_optimizer(model_provider_func,
                 args=args,
                 lr_scheduler=opt_param_scheduler,
                 training_data=train_ds,
-                mpu=mpu if args.no_pipeline_parallel else None
+                mpu=mpu if args.no_pipeline_parallel else None,
+                config=args.deepspeed_config_dict,
             )
             model.set_data_post_process_func(data_post_process)
         else:
@@ -583,7 +609,8 @@ def setup_model_and_optimizer(model_provider_func,
                 optimizer=optimizer,
                 args=args,
                 lr_scheduler=opt_param_scheduler,
-                mpu=mpu if args.no_pipeline_parallel else None
+                mpu=mpu if args.no_pipeline_parallel else None,
+                config=args.deepspeed_config_dict,
             )
         if isinstance(model, deepspeed.PipelineEngine):
             # hack to get batch_fn from pretrain_gpt.py
@@ -946,10 +973,10 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             if args.zero_stage > 0:
                 # ZeRO partiions optimizer states
                 opt_stats = get_accelerator().FloatTensor(opt_stats)
-                torch.distributed.all_reduce(opt_stats, group=mpu.get_data_parallel_group())
+                torch.distributed.all_reduce(opt_stats, group=mpu.get_sequence_data_parallel_group())
                 opt_stats_2 = get_accelerator().FloatTensor(opt_stats_2)
                 torch.distributed.all_reduce(opt_stats_2, op=torch.distributed.ReduceOp.MAX,
-                    group=mpu.get_data_parallel_group())
+                    group=mpu.get_sequence_data_parallel_group())
 
             if args.tensor_model_parallel_size > 1:
                 opt_stats = get_accelerator().FloatTensor(opt_stats)
@@ -999,7 +1026,27 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         seq_len = args.seq_length
         if hasattr(args, 'actual_seq_length'):
             seq_len = args.actual_seq_length
-        samples_per_sec, tflops, approx_parameters_in_billions = throughput_calculator(model, args, elapsed_time, total_iterations)
+        samples_per_sec, tflops, approx_parameters_in_billions = throughput_calculator(
+            model,
+            args,
+            elapsed_time,
+            total_iterations
+        )
+        samples_per_sec_per_replica = samples_per_sec / args.data_parallel_size
+        tokens_per_sec = samples_per_sec * seq_len
+        tokens_per_sec_per_replica = tokens_per_sec / args.data_parallel_size
+        if wandb is not None and getattr(wandb, 'run', None) is not None:
+            tput = {
+                'throughput/iteration-time': elapsed_time_per_iteration,  # 1000 ms / s
+                'throughput/samples_per_sec': samples_per_sec,
+                'throughput/samples_per_sec_per_replica': samples_per_sec_per_replica,
+                'throughput/tokens_per_sec': tokens_per_sec,
+                'throughput/tokens_per_sec_per_replica': tokens_per_sec_per_replica,
+                'throughput/tflops': tflops,
+                'throughput/approx_params_in_billions': approx_parameters_in_billions,
+                'throughput/elapsed_ms_per_iteration': elapsed_time_per_iteration,
+            }
+            wandb.run.log(tput)
         if writer:
             if args.log_timers_to_tensorboard:
                 writer.add_scalar('step/iteration-time/iteration-time',
@@ -1235,7 +1282,8 @@ def evaluate(forward_step_func,
              model,
              process_non_loss_data_func,
              config,
-             verbose=False):
+             verbose=False,
+             dataset_name=None):
     """Evaluation."""
     args = get_args()
 
@@ -1298,9 +1346,14 @@ def evaluate(forward_step_func,
                             total_loss_dict[key] = total_loss_dict.get(
                                 key, get_accelerator().FloatTensor([0.0])) + loss_dict[key]
 
-            args.consumed_valid_samples += mpu.get_data_parallel_world_size() \
-                                           * args.micro_batch_size \
-                                           * get_num_microbatches()
+            if args.multiple_valid_sets:
+                args.consumed_valid_samples[dataset_name] += mpu.get_data_parallel_world_size() \
+                                            * args.micro_batch_size \
+                                            * get_num_microbatches()
+            else:
+                args.consumed_valid_samples += mpu.get_data_parallel_world_size() \
+                                            * args.micro_batch_size \
+                                            * get_num_microbatches()
         collected_non_loss_data = None
         if process_non_loss_data_func is not None and is_last_rank():
             collected_non_loss_data = forward_backward_func(
@@ -1341,32 +1394,71 @@ def evaluate_and_print_results(prefix, forward_step_func,
     else:
         writer = None
 
-    total_loss_dict, collected_non_loss_data = evaluate(
-        forward_step_func, data_iterator, model,
-        process_non_loss_data_func, config, verbose)
-    string = ' validation loss at {} | '.format(prefix)
-    for key in total_loss_dict:
-        string += '{} value: {:.6E} | '.format(key, total_loss_dict[key].item())
-        ppl = math.exp(min(20, total_loss_dict[key].item()))
-        string += '{} PPL: {:.6E} | '.format(key, ppl)
-        if writer and is_last_rank():
-            data_type = 'test' if test else 'validation'
-            writer.add_scalar(f'step/lm-loss-validation/{key} {data_type}',
-                              total_loss_dict[key].item(),
-                              iteration)
-            writer.add_scalar(f'sample/lm-loss-validation/{key} {data_type} vs samples',
-                              total_loss_dict[key].item(),
-                              args.consumed_train_samples)
-            writer.add_scalar(f'token/lm-loss-validation/{key} {data_type} vs tokens',
-                              total_loss_dict[key].item(),
-                              args.consumed_train_tokens)
-            if args.log_validation_ppl_to_tensorboard:
-                writer.add_scalar(f'step/lm-loss-validation/{key} {data_type} ppl', ppl,
-                                  iteration)
-                writer.add_scalar(f'sample/lm-loss-validation/{key} {data_type} ppl vs samples',
-                                  ppl, args.consumed_train_samples)
-                writer.add_scalar(f'token/lm-loss-validation/{key} {data_type} ppl vs tokens',
-                                  ppl, args.consumed_train_tokens)
+    if isinstance(data_iterator, Mapping):
+        total_loss_dict=dict()
+        collected_non_loss_data=dict()
+        for name in data_iterator.keys():
+            total_loss_dict[name], collected_non_loss_data[name] = evaluate(
+                forward_step_func, data_iterator[name], model,
+                process_non_loss_data_func, config, verbose, dataset_name=name)
+    else:
+        total_loss_dict, collected_non_loss_data = evaluate(
+            forward_step_func, data_iterator, model,
+            process_non_loss_data_func, config, verbose)
+    
+    if isinstance(data_iterator, Mapping):
+        string = ''
+        for name in data_iterator.keys():
+            string += 'dataset ' + name + ' | '
+            string += 'validation loss at {} | '.format(prefix)
+            for key in total_loss_dict[name]:
+                string += '{} value: {:.6E} | '.format(key, total_loss_dict[name][key].item())
+                ppl = math.exp(min(20, total_loss_dict[name][key].item()))
+                string += '{} PPL: {:.6E} | '.format(key, ppl)
+                if writer and is_last_rank():
+                    data_type = 'test' if test else 'validation'
+                    writer.add_scalar(f'step/{name}/lm-loss-validation/{key} {data_type}',
+                                    total_loss_dict[name][key].item(),
+                                    iteration)
+                    writer.add_scalar(f'sample/{name}/lm-loss-validation/{key} {data_type} vs samples',
+                                    total_loss_dict[name][key].item(),
+                                    args.consumed_train_samples)
+                    writer.add_scalar(f'token/{name}/lm-loss-validation/{key} {data_type} vs tokens',
+                                    total_loss_dict[name][key].item(),
+                                    args.consumed_train_tokens)
+                    if args.log_validation_ppl_to_tensorboard:
+                        writer.add_scalar(f'step/{name}/lm-loss-validation/{key} {data_type} ppl', ppl,
+                                        iteration)
+                        writer.add_scalar(f'sample/{name}/lm-loss-validation/{key} {data_type} ppl vs samples',
+                                        ppl, args.consumed_train_samples)
+                        writer.add_scalar(f'token/{name}/lm-loss-validation/{key} {data_type} ppl vs tokens',
+                                        ppl, args.consumed_train_tokens)
+            string+='\n'
+    
+    else:
+        string = ' validation loss at {} | '.format(prefix)
+        for key in total_loss_dict:
+            string += '{} value: {:.6E} | '.format(key, total_loss_dict[key].item())
+            ppl = math.exp(min(20, total_loss_dict[key].item()))
+            string += '{} PPL: {:.6E} | '.format(key, ppl)
+            if writer and is_last_rank():
+                data_type = 'test' if test else 'validation'
+                writer.add_scalar(f'step/lm-loss-validation/{key} {data_type}',
+                                total_loss_dict[key].item(),
+                                iteration)
+                writer.add_scalar(f'sample/lm-loss-validation/{key} {data_type} vs samples',
+                                total_loss_dict[key].item(),
+                                args.consumed_train_samples)
+                writer.add_scalar(f'token/lm-loss-validation/{key} {data_type} vs tokens',
+                                total_loss_dict[key].item(),
+                                args.consumed_train_tokens)
+                if args.log_validation_ppl_to_tensorboard:
+                    writer.add_scalar(f'step/lm-loss-validation/{key} {data_type} ppl', ppl,
+                                    iteration)
+                    writer.add_scalar(f'sample/lm-loss-validation/{key} {data_type} ppl vs samples',
+                                    ppl, args.consumed_train_samples)
+                    writer.add_scalar(f'token/lm-loss-validation/{key} {data_type} ppl vs tokens',
+                                    ppl, args.consumed_train_tokens)
 
     if process_non_loss_data_func is not None and writer and is_last_rank():
         process_non_loss_data_func(collected_non_loss_data, iteration, writer)
@@ -1429,8 +1521,9 @@ def build_train_valid_test_data_loaders(
                 args.eval_iters * args.global_batch_size
 
     # Data loader only on rank 0 of each model parallel group.
-    if mpu.get_tensor_model_parallel_rank() == 0:
-
+    ds_sequence_parallel = mpu.get_sequence_parallel_world_size() > 1 or args.force_ds_sequence_parallel
+    rank_in_parallel_group = mpu.get_sequence_parallel_rank() if ds_sequence_parallel else mpu.get_tensor_model_parallel_rank()
+    if rank_in_parallel_group == 0:
         # Build datasets.
         train_ds, valid_ds, test_ds = build_train_valid_test_datasets(
             build_train_valid_test_datasets_provider)
@@ -1438,8 +1531,15 @@ def build_train_valid_test_data_loaders(
         # Build dataloders.
         train_dataloader = build_pretraining_data_loader(
             train_ds, args.consumed_train_samples)
-        valid_dataloader = build_pretraining_data_loader(
-            valid_ds, args.consumed_valid_samples)
+        if args.multiple_valid_sets:
+            valid_dataloader=dict()
+            for name in valid_ds.keys():
+                valid_dataloader[name] = build_pretraining_data_loader(
+                    valid_ds[name], args.consumed_valid_samples[name])
+        else:
+            valid_dataloader = build_pretraining_data_loader(
+                valid_ds, args.consumed_valid_samples)
+
         test_dataloader = build_pretraining_data_loader(test_ds, 0)
 
         # Flags to know if we need to do training/validation/testing.
@@ -1453,9 +1553,14 @@ def build_train_valid_test_data_loaders(
         flags = get_accelerator().LongTensor([0, 0, 0])
 
     # Broadcast num tokens.
-    torch.distributed.broadcast(flags,
-                                mpu.get_tensor_model_parallel_src_rank(),
-                                group=mpu.get_tensor_model_parallel_group())
+    if ds_sequence_parallel:
+        torch.distributed.broadcast(flags,
+                                    mpu.get_sequence_parallel_src_rank(),
+                                    group=mpu.get_sequence_parallel_group())
+    else:
+        torch.distributed.broadcast(flags,
+                                    mpu.get_tensor_model_parallel_src_rank(),
+                                    group=mpu.get_tensor_model_parallel_group())
     args.do_train = flags[0].item()
     args.do_valid = flags[1].item()
     args.do_test = flags[2].item()
@@ -1485,7 +1590,13 @@ def build_train_valid_test_data_iterators(
         train_data_iterator = None
 
     if valid_dataloader is not None:
-        valid_data_iterator = iter(valid_dataloader) if dl_type == 'single' \
+        if args.multiple_valid_sets:
+            valid_data_iterator=dict()
+            for name in valid_dataloader.keys():
+                valid_data_iterator[name] = iter(valid_dataloader[name]) if dl_type == 'single' \
+                              else iter(cyclic_iter(valid_dataloader[name]))
+        else:
+            valid_data_iterator = iter(valid_dataloader) if dl_type == 'single' \
                               else iter(cyclic_iter(valid_dataloader))
     else:
         valid_data_iterator = None

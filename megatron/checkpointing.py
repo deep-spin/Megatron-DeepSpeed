@@ -8,14 +8,23 @@ import sys
 import numpy as np
 from deepspeed.accelerator import get_accelerator
 import torch
+from collections.abc import Mapping
 
-from megatron import update_num_microbatches
+
+from megatron import update_num_microbatches, get_tokenizer
 from megatron.core import mpu, tensor_parallel
 from .global_vars import get_args
 from .utils import (unwrap_model,
                     print_rank_0,
                     is_rank_0)
 
+from deepspeed.checkpoint import (
+    ORIGINAL_VOCAB_SIZE,
+    PADDED_VOCAB_SIZE,
+    UNIVERSAL_CHECKPOINT_INFO,
+    UNIVERSAL_CHECKPOINT_VERSION_KEY,
+    UNIVERSAL_CHECKPOINT_VERSION_VALUE,
+)
 
 _CHECKPOINT_VERSION = None
 
@@ -61,15 +70,16 @@ def check_checkpoint_args(checkpoint_args):
     _compare('add_position_embedding', default=True)
     if args.vocab_file:
         _compare('max_position_embeddings')
-        _compare('make_vocab_size_divisible_by')
-        _compare('padded_vocab_size')
+        if not args.universal_checkpoint:
+            _compare('make_vocab_size_divisible_by')
+            _compare('padded_vocab_size')
         _compare('tokenizer_type')
     if args.data_parallel_random_init:
         _compare('data_parallel_random_init')
-    if get_checkpoint_version() < 3.0:
-        _compare('tensor_model_parallel_size',
+    if get_checkpoint_version() < 3.0 and not args.universal_checkpoint:
+        _compare('tensor_model_parallel_size',      
                  old_arg_name='model_parallel_size')
-    if get_checkpoint_version() >= 3.0:
+    if get_checkpoint_version() >= 3.0 and not args.universal_checkpoint:
         _compare('tensor_model_parallel_size')
         _compare('pipeline_model_parallel_size')
 
@@ -248,6 +258,7 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler):
         state_dict['checkpoint_version'] = 3.0
         state_dict['iteration'] = iteration
         state_dict['tokens'] = args.consumed_train_tokens
+        state_dict[UNIVERSAL_CHECKPOINT_INFO] = _universal_checkpoint_info(model)
 
         # DeepSpeed saves the model/optimizer/scheduler
         if not args.deepspeed:
@@ -384,7 +395,7 @@ def fix_query_key_value_ordering(model, checkpoint_version):
                     " checkpoint version {}".format(checkpoint_version))
 
 
-def _load_base_checkpoint(load_dir, rank0=False):
+def _load_base_checkpoint(load_dir, rank0=False, fixed_iteration=None):
     """ Load the base state_dict from the given directory
 
     If rank0 is true, just loads rank 0 checkpoint, ignoring arguments.
@@ -404,7 +415,9 @@ def _load_base_checkpoint(load_dir, rank0=False):
 
     # Otherwise, read the tracker file and either set the iteration or
     # mark it as a release checkpoint.
-    iteration, release = read_metadata(tracker_filename)
+    last_iteration, release = read_metadata(tracker_filename)
+    # load last iteration if fixed iteration is not set
+    iteration = fixed_iteration if fixed_iteration is not None else last_iteration
 
     # Checkpoint.
     if rank0:
@@ -520,7 +533,7 @@ def load_args_from_checkpoint(args, load_arg='load'):
     return args, checkpoint_args
 
 
-def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', strict=True, load_only_weights=False):
+def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', strict=True, load_only_weights=False, load_iteration=None):
     """Load a model checkpoint and return the iteration.
     strict (bool): whether to strictly enforce that the keys in
         :attr:`state_dict` of the checkpoint match the names of
@@ -530,12 +543,20 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
     load_dir = getattr(args, load_arg)
 
     if args.deepspeed:
-        if args.finetune or ("task" in vars(args) and args.task == "WIKITEXT103"):
+        if load_iteration is not None:
+            print_rank_0("Will load checkpoint at iteration {}".format(load_iteration))
+            tag = "global_step{}".format(load_iteration)
+        else:
+            tag = None
+            
+        if load_only_weights or args.finetune or ("task" in vars(args) and args.task == "WIKITEXT103"):
             loaded_dir, state_dict = model[0].load_checkpoint(load_dir,
+                tag=tag,
                 load_module_strict=strict, load_optimizer_states=False,
                 load_lr_scheduler_states=False, load_module_only=True)
         else:
             loaded_dir, state_dict = model[0].load_checkpoint(load_dir,
+                tag=tag,
                 load_module_strict=strict)
         if loaded_dir is None:
             print_rank_0('WARNING: could not find the metadata file {} '.format(
@@ -543,11 +564,11 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
             print_rank_0('    will not load any checkpoints and will start from '
                         'random')
             return 0
-        release = False
+        release = False        
     else:
         model = unwrap_model(model)
 
-        state_dict, release = _load_base_checkpoint(load_dir, rank0=False)
+        state_dict, release = _load_base_checkpoint(load_dir, rank0=False, fixed_iteration=iteration)
 
         # Checkpoint not loaded.
         if state_dict is None:
@@ -588,14 +609,32 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
     reset_train_valid_samples = args.reset_iteration
     if not load_only_weights and not reset_train_valid_samples:
         assert args.consumed_train_samples == 0
-        assert args.consumed_valid_samples == 0
+
+        if args.multiple_valid_sets:
+            for key in args.consumed_valid_samples.keys():
+                assert args.consumed_valid_samples[key] == 0
+        else:
+            assert args.consumed_valid_samples == 0
+
         if 'args' in state_dict and not args.finetune:
             checkpoint_args = state_dict['args']
             check_checkpoint_args(checkpoint_args)
             args.consumed_train_samples = getattr(checkpoint_args,
                                                 'consumed_train_samples', 0)
             update_num_microbatches(consumed_samples=args.consumed_train_samples)
-            args.consumed_valid_samples = getattr(checkpoint_args,
+
+            if args.multiple_valid_sets:
+                args.consumed_valid_samples = getattr(checkpoint_args,
+                                                'consumed_valid_samples', 0)
+
+                if not isinstance(args.consumed_valid_samples, Mapping):
+                    args.consumed_valid_samples = dict()
+                    for i, name in enumerate(args.valid_data_path):
+                        if i%2==0:
+                            args.consumed_valid_samples[name]=0 
+                
+            else:
+                args.consumed_valid_samples = getattr(checkpoint_args,
                                                 'consumed_valid_samples', 0)
         else:
             print_rank_0('could not find arguments in the checkpoint ...')
@@ -692,6 +731,10 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
     print_rank_0(f'  successfully loaded checkpoint from {args.load} '
                  f'at iteration {iteration}')
 
+    # from .utils import dump_weights, dump_position_embed_weights
+    # dump_weights(f'{args.universal_checkpoint=}', iteration, model, optimizer)
+    # dump_position_embed_weights("init", 0, model)
+
     return iteration
 
 
@@ -736,3 +779,14 @@ def load_biencoder_checkpoint(model, only_query_model=False,
         print(' successfully loaded {}'.format(checkpoint_name))
 
     return model
+
+
+def _universal_checkpoint_info(model):
+    args = get_args()
+    tokenizer = get_tokenizer()
+    info = dict()
+    info[UNIVERSAL_CHECKPOINT_VERSION_KEY] = UNIVERSAL_CHECKPOINT_VERSION_VALUE
+    info[ORIGINAL_VOCAB_SIZE] = tokenizer.vocab_size
+    info[PADDED_VOCAB_SIZE] = args.padded_vocab_size
+    info.update(model[0].universal_checkpoint_info())
+    return info
