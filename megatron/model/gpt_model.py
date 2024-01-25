@@ -81,7 +81,7 @@ def post_language_model_processing(lm_output, labels, logit_weights,
         vocab_size = output.size(-1)
         loss = f(output.float().view(-1, vocab_size), labels.view(-1))
         loss = loss.view(b, s)
-        return loss
+    return loss
 
 
 class GPTModel(MegatronModule):
