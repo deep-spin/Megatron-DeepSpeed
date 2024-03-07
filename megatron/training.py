@@ -1090,6 +1090,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         if args.curriculum_learning_legacy or args.data_efficiency_curriculum_learning:
             log_string += ' curriculum seqlen: {:5d} |'.format(args.curriculum_seqlen)
         if args.random_ltd:
+<<<<<<< HEAD
             log_string += ' random ltd reserved length: {:5d} |'.format(args.random_ltd_reserved_length)
         log_string += ' actual seqlen: {:5d} |'.format(seq_len)
         log_string += ' number of skipped iterations: {:3d} |'.format(
@@ -1098,6 +1099,27 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             total_loss_dict[nan_iters_key])
         log_string += ' samples per second: {:.3f} |'.format(samples_per_sec)
         log_string += ' TFLOPs: {:.2f} |'.format(tflops)
+        log_string += ' time to completion (hours): {:.3f} |'.format(
+            elapsed_time_per_iteration * (args.train_iters - iteration) / 3_600_000)
+        
+=======
+            log_string += " random ltd reserved length: {:5d} |".format(
+                args.random_ltd_reserved_length
+            )
+        log_string += " actual seqlen: {:5d} |".format(seq_len)
+        log_string += " number of skipped iterations: {:3d} |".format(
+            total_loss_dict[skipped_iters_key]
+        )
+        log_string += " number of nan iterations: {:3d} |".format(
+            total_loss_dict[nan_iters_key]
+        )
+        log_string += " samples per second: {:.3f} |".format(samples_per_sec)
+        log_string += " TFLOPs: {:.2f} |".format(tflops)
+        log_string += " time to completion (hours): {:.3f} |".format(
+            elapsed_time_per_iteration * (args.train_iters - iteration) / 3600
+        )
+
+>>>>>>> f18ad47 (deal with empty lines in preproc (CHERRY PICK THIS))
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[nan_iters_key] = 0
