@@ -325,7 +325,9 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
         valid_data_prefix=args.valid_data_path,
         multiple_valid_sets=args.multiple_valid_sets,
         test_data_prefix=args.test_data_path,
-        data_cache_path=args.data_cache_path)
+        data_cache_path=args.data_cache_path,
+        shuffle_docs_before_split=args.shuffle_docs_before_split,
+        )
     print_rank_0("> finished creating GPT datasets ...")
 
     return train_ds, valid_ds, test_ds
