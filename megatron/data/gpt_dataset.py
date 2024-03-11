@@ -31,6 +31,7 @@ def build_train_valid_test_datasets(
     multiple_valid_sets=False,
     test_data_prefix=None,
     return_doc_ids=False,
+    shuffle_docs_before_split=False,
     *,
     data_cache_path=None,
 ):
@@ -189,7 +190,7 @@ def _build_train_valid_test_datasets(
     seed,
     skip_warmup,
     return_doc_ids=False,
-    shuffle_docs_before_split=True,
+    shuffle_docs_before_split=False,
     *,
     data_cache_path=None,
 ):
@@ -228,15 +229,19 @@ def _build_train_valid_test_datasets(
 
         if splits[index + 1] > splits[index]:
             if shuffle_docs_before_split:
+                print("> Hashing documents to random train/test/valid splits")
                 documents = [
                     doc_idx
                     for doc_idx in range(total_documents)
                     if doc_idx_to_split(doc_idx, 42, split_ratios) == index
                 ]
+                force_rebuild_indices = True
             else:
                 documents = np.arange(
                     start=splits[index], stop=splits[index + 1], step=1, dtype=np.int32
                 )
+                force_rebuild_indices = False
+
             dataset = GPTDataset(
                 name,
                 data_prefix,
@@ -248,6 +253,7 @@ def _build_train_valid_test_datasets(
                 seed,
                 return_doc_ids,
                 data_cache_path=data_cache_path,
+                force_rebuild_indices=force_rebuild_indices,
             )
         return dataset
 
@@ -271,7 +277,7 @@ def _build_train_valid_test_datasets(
     test_dataset = build_dataset(
         2, "test", total_num_of_documents, splits, shuffle_docs_before_split
     )
-    if True:
+    if shuffle_docs_before_split:
         print("Train dataset size:", len(train_dataset))
         print("Train dataset first 10 doc ids:", train_dataset.doc_idx[:10])
 
@@ -414,6 +420,7 @@ class GPTDataset(torch.utils.data.Dataset):
         seq_length,
         seed,
         return_doc_ids=False,
+        force_rebuild_indices=False,
         *,
         data_cache_path=None,
     ):
@@ -438,6 +445,7 @@ class GPTDataset(torch.utils.data.Dataset):
                 seq_length,
                 seed,
                 data_cache_path=data_cache_path,
+                force_rebuild_indices=force_rebuild_indices,
             )
         )
 

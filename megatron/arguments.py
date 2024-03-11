@@ -1303,6 +1303,7 @@ def _add_data_args(parser):
                        help='Force to use certain index file.')
     group.add_argument('--train-shuffle-idx-path', type=str, default=None,
                        help='Force to use certain index file.')
+    group.add_argument("--shuffle_docs_before_split", action="store_true", help="Randomize the indices of train/valid/dev rather than using a top-level slice")
     return parser
 
 
