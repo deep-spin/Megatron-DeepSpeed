@@ -235,12 +235,10 @@ def _build_train_valid_test_datasets(
                     for doc_idx in range(total_documents)
                     if doc_idx_to_split(doc_idx, 42, split_ratios) == index
                 ]
-                force_rebuild_indices = True
             else:
                 documents = np.arange(
                     start=splits[index], stop=splits[index + 1], step=1, dtype=np.int32
                 )
-                force_rebuild_indices = False
 
             dataset = GPTDataset(
                 name,
@@ -253,7 +251,7 @@ def _build_train_valid_test_datasets(
                 seed,
                 return_doc_ids,
                 data_cache_path=data_cache_path,
-                force_rebuild_indices=force_rebuild_indices,
+                shuffle_docs_before_split=shuffle_docs_before_split,
             )
         return dataset
 
@@ -420,7 +418,7 @@ class GPTDataset(torch.utils.data.Dataset):
         seq_length,
         seed,
         return_doc_ids=False,
-        force_rebuild_indices=False,
+        shuffle_docs_before_split=False,
         *,
         data_cache_path=None,
     ):
@@ -428,6 +426,7 @@ class GPTDataset(torch.utils.data.Dataset):
         self.name = name
         self.indexed_dataset = indexed_dataset
         self.return_doc_ids = return_doc_ids
+        self.shuffle_orig_docs = shuffle_docs_before_split
 
         # Checks
         assert np.min(documents) >= 0
@@ -445,7 +444,7 @@ class GPTDataset(torch.utils.data.Dataset):
                 seq_length,
                 seed,
                 data_cache_path=data_cache_path,
-                force_rebuild_indices=force_rebuild_indices,
+                shuffle_orig_docs=self.shuffle_orig_docs,
             )
         )
 
@@ -512,7 +511,7 @@ def _build_index_mappings(
     num_samples,
     seq_length,
     seed,
-    force_rebuild_indices=True,
+    shuffle_orig_docs=False,
     *,
     data_cache_path,
 ):
@@ -541,6 +540,8 @@ def _build_index_mappings(
     desc += f"Sequence length {seq_length}\n"
     desc += f"Random seed {seed}\n"
     desc += f"Split {splits_string}\n"
+    desc += f"Shuffle original documents {shuffle_orig_docs}\n"
+
     desc_hash = hashlib.md5(desc.encode("utf-8")).hexdigest()
     desc_filename = desc_hash + ".dsc"
     doc_idx_filename = desc_hash + "_doc_idx.npy"
@@ -583,8 +584,6 @@ def _build_index_mappings(
     data_cache_dir = os.path.dirname(idx_path["desc"])
     data_cache_success = True
 
-    if force_rebuild_indices:
-        build_indices = True
     # Build the indexed mapping if not exist.
     if build_indices and is_rank_0():
         print_rank_0(
