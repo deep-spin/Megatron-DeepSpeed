@@ -1099,7 +1099,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         log_string += ' samples per second: {:.3f} |'.format(samples_per_sec)
         log_string += ' TFLOPs: {:.2f} |'.format(tflops)
         log_string += ' time to completion (hours): {:.3f} |'.format(
-            elapsed_time_per_iteration * (args.train_iters - iteration) / 3_600_000)
+            elapsed_time_per_iteration * (args.train_iters - iteration) / 3600)
         
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
