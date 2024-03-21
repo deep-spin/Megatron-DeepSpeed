@@ -211,7 +211,7 @@ def get_batch_pipe(data):
     return (tokens, position_ids, attention_mask), (labels, loss_mask)
 
 
-def loss_func(loss_mask, moe_loss, mos_loss, output_tensor):
+def loss_func(loss_mask, moe_loss, mos_loss, support_size, output_tensor):
     args = get_args()
     losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
@@ -229,7 +229,12 @@ def loss_func(loss_mask, moe_loss, mos_loss, output_tensor):
         print_rank_0('>>> total loss: {}, lm loss {}, kd loss {}'.format(loss, averaged_loss[0], mos_loss))
     else:
         if max(args.num_experts) <= 1:
-            return loss, {'lm loss': averaged_loss[0]}
+            if support_size is not None:
+                # need to average the support sizes, I guess
+                # todo: return support
+                return loss, {'lm loss': averaged_loss[0]}
+            else:
+                return loss, {'lm loss': averaged_loss[0]}
         else:
             loss = loss + moe_loss
             return loss, {'lm loss': averaged_loss[0], 'moe loss': moe_loss}
@@ -277,6 +282,7 @@ def forward_step(data_iterator, model):
             args.data_efficiency_curriculum_learning_seqlen_type == 'seqlen_reshape':
             args.data_efficiency_curriculum_learning_numel = torch.numel(tokens)
 
+    support_size = None
     if args.mos or args.kd:
         # The forward func can return either the loss or the logits, depending on whether passing in the labels or not.
         stu_output, other_losses = model(tokens, position_ids, attention_mask)
@@ -285,8 +291,9 @@ def forward_step(data_iterator, model):
             labels = labels[:, :args.curriculum_seqlen].contiguous()
         output_tensor = tensor_parallel.vocab_parallel_cross_entropy(stu_output.contiguous().float(), labels)
     else:
-        output_tensor, other_losses = model(tokens, position_ids, attention_mask,
-                                            labels=labels)
+        output_tensor, other_losses, support_size = model(
+            tokens, position_ids, attention_mask, labels=labels, return_support=True
+        )
     if args.curriculum_learning_legacy and args.curriculum_seqlen < args.seq_length:
         loss_mask = loss_mask[:, :args.curriculum_seqlen].contiguous()
 
@@ -304,7 +311,7 @@ def forward_step(data_iterator, model):
                 args.teacher_model[0], tokens, position_ids, attention_mask)
 
     # Output_tensor stores the standard loss, loos_func calculates the total loss.
-    return output_tensor, partial(loss_func, loss_mask, moe_loss, mos_loss)
+    return output_tensor, partial(loss_func, loss_mask, moe_loss, mos_loss, support_size)
 
 
 def train_valid_test_datasets_provider(train_val_test_num_samples):

@@ -42,7 +42,7 @@ except ImportError:
 def post_language_model_processing(lm_output, labels, logit_weights,
                                    parallel_output,
                                    fp16_lm_cross_entropy,
-                                   loss_function, alpha, topk, n_iter):
+                                   loss_function, alpha, topk, n_iter, return_support=False):
 
     # Output. Format [s b h]
     output = parallel_lm_logits(
@@ -50,6 +50,7 @@ def post_language_model_processing(lm_output, labels, logit_weights,
         logit_weights,
         parallel_output)
 
+    # should it return a None support size in this case? let's say no for now
     if labels is None:
         # [s b h] => [b s h]
         return output.transpose(0,1).contiguous()
@@ -68,20 +69,29 @@ def post_language_model_processing(lm_output, labels, logit_weights,
 
         # [s b] => [b, s]
         loss = loss.transpose(0,1).contiguous()
+        support = None
     else:
         # now: the loss function is "entmax15", "sparsemax", or "entmax_bisect"
         loss_funcs = {
-            "entmax15": partial(entmax.entmax15_loss, k=topk),
-            "sparsemax": partial(entmax.sparsemax_loss, k=topk),
+            "entmax15": partial(entmax.entmax15_loss, k=topk, return_support=True),
+            "sparsemax": partial(entmax.sparsemax_loss, k=topk, return_support=True),
             "entmax_bisect": partial(entmax.entmax_bisect_loss, alpha=alpha, n_iter=n_iter)
         }
         f = loss_funcs[loss_function]
 
         b, s = labels.size()
         vocab_size = output.size(-1)
-        loss = f(output.float().view(-1, vocab_size), labels.view(-1))
+        if loss_function != "entmax_bisect":
+            loss, support = f(output.float().view(-1, vocab_size), labels.view(-1))
+        else:
+            loss = f(output.float().view(-1, vocab_size), labels.view(-1))
+            support = None
         loss = loss.view(b, s)
-    return loss
+
+    if return_support:
+        return loss, support
+    else:
+        return loss
 
 
 class GPTModel(MegatronModule):
@@ -129,7 +139,8 @@ class GPTModel(MegatronModule):
                 retriever_position_ids=None,
                 retriever_attn_mask=None,
                 labels=None, tokentype_ids=None, inference_params=None,
-                curriculum_seqlen=None):
+                curriculum_seqlen=None,
+                return_support=False):
         args = get_args()
         if curriculum_seqlen is not None:
             args.curriculum_seqlen = curriculum_seqlen
@@ -158,7 +169,7 @@ class GPTModel(MegatronModule):
             inference_params=inference_params)
 
         if self.post_process:
-            lm_output = post_language_model_processing(
+            lm_output, support_size = post_language_model_processing(
                 lm_output, labels,
                 self.language_model.output_layer.weight if self.untie_embeddings_and_output_weights else self.shared_embedding_or_output_weight(),
                 self.parallel_output,
@@ -166,9 +177,13 @@ class GPTModel(MegatronModule):
                 self.loss_function,
                 self.entmax_alpha,
                 self.entmax_topk,
-                self.entmax_n_iter)
-
-        return lm_output, moe_losses if self.return_moe_loss else lm_output
+                self.entmax_n_iter,
+                return_support=True)
+        # now...what do do about support_size?
+        if return_support:
+            return lm_output, moe_losses if self.return_moe_loss else lm_output, support_size
+        else:
+            return lm_output, moe_losses if self.return_moe_loss else lm_output
 
     def state_dict_for_save_checkpoint(self, prefix='', keep_vars=False):
 
