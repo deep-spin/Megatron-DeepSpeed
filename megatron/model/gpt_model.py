@@ -78,8 +78,8 @@ def post_language_model_processing(lm_output, labels, logit_weights,
             "entmax_bisect": partial(entmax.entmax_bisect_loss, alpha=alpha, n_iter=n_iter)
         }
         f = loss_funcs[loss_function]
-
         b, s = labels.size()
+        output = output.transpose(0, 1).contiguous()
         vocab_size = output.size(-1)
         if loss_function != "entmax_bisect":
             loss, support = f(output.float().view(-1, vocab_size), labels.view(-1))

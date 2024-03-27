@@ -230,9 +230,13 @@ def loss_func(loss_mask, moe_loss, mos_loss, support_size, output_tensor):
     else:
         if max(args.num_experts) <= 1:
             if support_size is not None:
+                support_size = support_size.float()
                 # need to average the support sizes, I guess
                 # todo: return support
-                return loss, {'lm loss': averaged_loss[0]}
+                # average_support = average_losses_across_data_parallel_group([support_size])
+                torch.distributed.all_reduce(support_size, group=mpu.get_data_parallel_group())
+                support_size = support_size / torch.distributed.get_world_size(group=mpu.get_data_parallel_group())
+                return loss, {'lm loss': averaged_loss[0], 'support size': support_size.mean()}
             else:
                 return loss, {'lm loss': averaged_loss[0]}
         else:
