@@ -1009,7 +1009,7 @@ def _add_learning_rate_args(parser):
                        '(learning rate, warmup iterations, minimum learning '
                        'rate, maximum number of iterations, and decay style '
                        'from checkpoint and ignore input arguments.')
-
+    group.add_argument('--annealing', action='store_true',)
     return parser
 
 
