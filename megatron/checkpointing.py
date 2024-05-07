@@ -554,6 +554,11 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                 tag=tag,
                 load_module_strict=strict, load_optimizer_states=False,
                 load_lr_scheduler_states=False, load_module_only=True)
+        elif args.annealing:
+            loaded_dir, state_dict = model[0].load_checkpoint(load_dir,
+                tag=tag,
+                load_module_strict=strict, load_optimizer_states=True,
+                load_lr_scheduler_states=False)
         else:
             loaded_dir, state_dict = model[0].load_checkpoint(load_dir,
                 tag=tag,
@@ -587,7 +592,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
     set_checkpoint_version(state_dict.get('checkpoint_version', 0))
 
     # Set iteration.
-    if args.finetune or release or args.reset_iteration or load_only_weights:
+    if args.finetune or release or args.reset_iteration or load_only_weights or args.annealing:
         iteration = 0
         # Make DeepSpeed engine aware of this reset of iteration
         model[0].global_steps = 0
@@ -616,7 +621,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
         else:
             assert args.consumed_valid_samples == 0
 
-        if 'args' in state_dict and not args.finetune:
+        if 'args' in state_dict and not args.finetune and not args.annealing:
             checkpoint_args = state_dict['args']
             check_checkpoint_args(checkpoint_args)
             args.consumed_train_samples = getattr(checkpoint_args,
@@ -673,7 +678,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                     optimizer.load_parameter_state(optim_checkpoint_name)
 
                 # Load scheduler.
-                if opt_param_scheduler is not None:
+                if opt_param_scheduler is not None and not args.annealing:
                     if 'lr_scheduler' in state_dict: # backward compatbility
                         opt_param_scheduler.load_state_dict(state_dict['lr_scheduler'])
                     else:
