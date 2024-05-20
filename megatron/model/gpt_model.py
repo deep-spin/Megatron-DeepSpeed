@@ -42,7 +42,7 @@ except ImportError:
 def post_language_model_processing(lm_output, labels, logit_weights,
                                    parallel_output,
                                    fp16_lm_cross_entropy,
-                                   loss_function, alpha, topk, n_iter, return_support=False):
+                                   loss_function, alpha, topk, n_iter, return_support_size=False):
 
     # Output. Format [s b h]
     output = parallel_lm_logits(
@@ -73,8 +73,8 @@ def post_language_model_processing(lm_output, labels, logit_weights,
     else:
         # now: the loss function is "entmax15", "sparsemax", or "entmax_bisect"
         loss_funcs = {
-            "entmax15": partial(entmax.entmax15_loss, k=topk, return_support=True),
-            "sparsemax": partial(entmax.sparsemax_loss, k=topk, return_support=True),
+            "entmax15": partial(entmax.entmax15_loss, k=topk, return_support_size=True),
+            "sparsemax": partial(entmax.sparsemax_loss, k=topk, return_support_size=True),
             "entmax_bisect": partial(entmax.entmax_bisect_loss, alpha=alpha, n_iter=n_iter)
         }
         f = loss_funcs[loss_function]
@@ -88,7 +88,7 @@ def post_language_model_processing(lm_output, labels, logit_weights,
             support = None
         loss = loss.view(b, s)
 
-    if return_support:
+    if return_support_size:
         return loss, support
     else:
         return loss
@@ -140,7 +140,7 @@ class GPTModel(MegatronModule):
                 retriever_attn_mask=None,
                 labels=None, tokentype_ids=None, inference_params=None,
                 curriculum_seqlen=None,
-                return_support=False):
+                return_support_size=False):
         args = get_args()
         if curriculum_seqlen is not None:
             args.curriculum_seqlen = curriculum_seqlen
@@ -178,9 +178,9 @@ class GPTModel(MegatronModule):
                 self.entmax_alpha,
                 self.entmax_topk,
                 self.entmax_n_iter,
-                return_support=True)
+                return_support_size=True)
         # now...what do do about support_size?
-        if return_support:
+        if return_support_size:
             return lm_output, moe_losses if self.return_moe_loss else lm_output, support_size
         else:
             return lm_output, moe_losses if self.return_moe_loss else lm_output
