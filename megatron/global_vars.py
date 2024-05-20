@@ -153,19 +153,18 @@ def _set_tensorboard_writer(args):
                 print('WARNING: WanDB writing requested but is not '
                       'available, '
                       'no WandB logs will be written.', flush=True)
-        else:
-            if hasattr(args, 'tensorboard_dir') and \
-            args.tensorboard_dir and args.rank == (args.world_size - 1):
-                try:
-                    from torch.utils.tensorboard import SummaryWriter
-                    print('> setting tensorboard ...')
-                    _GLOBAL_TENSORBOARD_WRITER = SummaryWriter(
-                        log_dir=args.tensorboard_dir,
-                        max_queue=args.tensorboard_queue_size)
-                except ModuleNotFoundError:
-                    print('WARNING: TensorBoard writing requested but is not '
-                        'available (are you using PyTorch 1.1.0 or later?), '
-                        'no TensorBoard logs will be written.', flush=True)
+    elif (hasattr(args, 'tensorboard_dir') and 
+          args.tensorboard_dir and args.rank == (args.world_size - 1)):
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            print('> setting tensorboard ...')
+            _GLOBAL_TENSORBOARD_WRITER = SummaryWriter(
+                log_dir=args.tensorboard_dir,
+                max_queue=args.tensorboard_queue_size)
+        except ModuleNotFoundError:
+            print('WARNING: TensorBoard writing requested but is not '
+                'available (are you using PyTorch 1.1.0 or later?), '
+                'no TensorBoard logs will be written.', flush=True)
 
 
 def _set_adlr_autoresume(args):
