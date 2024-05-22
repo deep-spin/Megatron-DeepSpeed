@@ -238,11 +238,13 @@ def loss_func(loss_mask, moe_loss, mos_loss, support_size, output_tensor):
 
                 # what is the max support size in the batch?
                 max_support = support_size.max()
+                min_support = support_size.min()
 
                 # sum support stats across groups
                 current_group = mpu.get_data_parallel_group()
                 torch.distributed.all_reduce(support_size, group=current_group)
                 torch.distributed.all_reduce(max_support, group=current_group)
+                torch.distributed.all_reduce(min_support, group=current_group)
                 torch.distributed.all_reduce(fully_peaked, group=current_group)
 
                 # find number of groups
@@ -255,11 +257,33 @@ def loss_func(loss_mask, moe_loss, mos_loss, support_size, output_tensor):
 
                 # compute mean max support
                 max_support = max_support / world_size
+                min_support = min_support / world_size
 
                 # compute how often support is fully peaked
                 fully_peaked = fully_peaked / (world_size * n_tokens)
 
-                return loss, {'lm loss': averaged_loss[0], 'support size': support_size.mean(), "support max": max_support, "fully peaked": fully_peaked}
+                # the stats for support size might be slightly wrong, but still
+                # illustrative
+                support_mean = support_size.mean()
+                support_std = support_size.std()
+                quantiles = torch.linspace(
+                    0, 1, 5, dtype=support_size.dtype, device=support_size.device
+                )
+                support_quantiles = torch.quantile(support_size, quantiles)
+
+                loss_dict = {
+                    'lm loss': averaged_loss[0],
+                    'support size': support_mean,
+                    "support std": support_std,
+                    "support max": max_support,
+                    "support min": min_support,
+                    "support 25%": support_quantiles[1],
+                    "support 50%": support_quantiles[2],
+                    "support 75%": support_quantiles[3],
+                    "fully peaked": fully_peaked
+                }
+
+                return loss, loss_dict
             else:
                 return loss, {'lm loss': averaged_loss[0]}
         else:
