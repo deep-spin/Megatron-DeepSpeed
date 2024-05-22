@@ -231,17 +231,41 @@ def loss_func(loss_mask, moe_loss, mos_loss, support_size, output_tensor):
         if max(args.num_experts) <= 1:
             if support_size is not None:
                 support_size = support_size.float()
-                torch.distributed.all_reduce(support_size, group=mpu.get_data_parallel_group())
-                support_size = support_size / torch.distributed.get_world_size(group=mpu.get_data_parallel_group())
-                # this way to compute the max support will be incorrect on
-                # multiple GPUs, but the numbers should still be reasonably
-                # informative
-                return loss, {'lm loss': averaged_loss[0], 'support size': support_size.mean(), "support max": support_size.max()}
+                n_tokens = support_size.size(0)
+
+                # how often is support size 1?
+                fully_peaked = support_size.eq(1).sum()
+
+                # what is the max support size in the batch?
+                max_support = support_size.max()
+
+                # sum support stats across groups
+                current_group = mpu.get_data_parallel_group()
+                torch.distributed.all_reduce(support_size, group=current_group)
+                torch.distributed.all_reduce(max_support, group=current_group)
+                torch.distributed.all_reduce(fully_peaked, group=current_group)
+
+                # find number of groups
+                world_size = torch.distributed.get_world_size(
+                    group=mpu.get_data_parallel_group()
+                )
+
+                # compute mean support size
+                support_size = support_size / world_size
+
+                # compute mean max support
+                max_support = max_support / world_size
+
+                # compute how often support is fully peaked
+                fully_peaked = fully_peaked / (world_size * n_tokens)
+
+                return loss, {'lm loss': averaged_loss[0], 'support size': support_size.mean(), "support max": max_support, "fully peaked": fully_peaked}
             else:
                 return loss, {'lm loss': averaged_loss[0]}
         else:
             loss = loss + moe_loss
             return loss, {'lm loss': averaged_loss[0], 'moe loss': moe_loss}
+
 
 def calculate_mos_loss(args, stu_output, teacher_model, tokens, position_ids, attention_mask):
     mos_loss = 0
