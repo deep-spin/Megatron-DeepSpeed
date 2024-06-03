@@ -90,11 +90,13 @@ class Encoder(object):
             sentence_lens = []
             for sentence in sentences:
                 sentence_ids = Encoder.tokenizer.tokenize(sentence)
+                if self.args.append_eod:
+                    sentence_ids.append(Encoder.tokenizer.eod)
                 if len(sentence_ids) > 0:
                     doc_ids.extend(sentence_ids)
                     sentence_lens.append(len(sentence_ids))
-            if len(doc_ids) > 0 and self.args.append_eod:
-                doc_ids.append(Encoder.tokenizer.eod)
+            #if len(doc_ids) > 0 and self.args.append_eod:
+            #    doc_ids.append(Encoder.tokenizer.eod)
             ids[key] = doc_ids
             lens[key] = sentence_lens
         return ids, lens, len(json_line)
