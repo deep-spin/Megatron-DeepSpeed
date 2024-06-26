@@ -336,6 +336,21 @@ def evaluate_and_print_results(task, data_loader, model, eval_metric):
             string += 'total examples: {:.4E} | '.format(num_examples)
             string += 'avg accuracy: {:.4E}'.format(acc)
 
+        elif eval_metric == "force_decoded_accuracy":
+            num_tokenized_tokens = data_loader.dataset.num_tokenized_tokens
+            acc = output / (num_tokenized_tokens - 1)
+            string += 'number correct: {:.4E} | '.format(output)
+            string += 'total tokens: {:.4E} | '.format(num_tokenized_tokens)
+            string += 'avg accuracy: {:.4E}'.format(acc)
+
+            results = {
+                "accuracy": acc,
+                "n_correct": output,
+                "n_tokens": num_tokenized_tokens
+            }
+            with open('./eval_results', 'w') as json_file:
+                json.dump(results, json_file)
+
         else:
             raise NotImplementedError('evaluation method for {} metric is not '
                                       'implemented yet.'.format(eval_metric))
