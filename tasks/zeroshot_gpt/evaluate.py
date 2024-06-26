@@ -47,7 +47,7 @@ def get_model_provider(eval_metric):
 
         config = core_transformer_config_from_args(get_args())
 
-        if eval_metric == 'loss':
+        if eval_metric == 'loss' or eval_metric == 'force_decoded_accuracy':
             parallel_output = True
         elif eval_metric == 'accuracy':
             parallel_output = False
@@ -186,6 +186,37 @@ def _compute_loss(output, labels, loss_mask, loss_function="cross_entropy", topk
     return loss
 
 
+def _force_decoded_accuracy(output, labels, loss_mask):
+    """
+    This is different from LAMBADA accuracy, which is only about getting the
+    final word right based on a long context.
+
+    Dimensions are confusing but I think I've figured it out. Based on
+    process_batch (defined above) and forward_step, labels is [b s]. I assume
+    loss_mask is the same shape. And I assume that output is [b s V] (it would
+    be ridiculously confusing otherwise).
+
+    Based on the documentation of tensor_parallel.vocab_parallel_cross_entropy,
+    we can expect output (or rather, output[0], which should be the decoder
+    output based on TransformerLanguageModel.forward) to be [s b V] and labels
+    to be [s b].
+    """
+
+    # same as for the loss one, but not the accuracy one.
+    # keep these print statements for a bit
+    print("output type before _compute_loss", type(output))
+    if isinstance(output, torch.Tensor):
+        print("size before indexing", output.size())
+    output = output[0]  # based on how loss was previously computed
+    print("size after indexing", output.size())
+
+    predictions = output.argmax(dim=-1).view(-1)
+    correct = predictions.eq(labels.view(-1)).float()
+
+    correct_sum = torch.sum(correct * loss_mask.contiguous().view(-1).float())
+    return correct_sum
+
+
 def forward_step(batch, model, eval_metric):
     """Forward step."""
 
@@ -224,6 +255,10 @@ def forward_step(batch, model, eval_metric):
                 loss_function=args.loss_function, topk=args.entmax_topk, n_iter=args.entmax_n_iter, alpha=args.entmax_alpha
             )
             return loss
+
+        if eval_metric == "force_decoded_accuracy":
+            correct_sum = _force_decoded_accuracy(output, labels, loss_mask)
+            return correct_sum
 
         # For accuracy, return the number of correctly predicted samples.
         if eval_metric == 'accuracy':
