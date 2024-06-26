@@ -202,13 +202,8 @@ def _force_decoded_accuracy(output, labels, loss_mask):
     to be [s b].
     """
 
-    # same as for the loss one, but not the accuracy one.
-    # keep these print statements for a bit
-    print("output type before _compute_loss", type(output))
-    if isinstance(output, torch.Tensor):
-        print("size before indexing", output.size())
-    output = output[0]  # based on how loss was previously computed
-    print("size after indexing", output.size())
+    # the raw output is a tuple (same as for eval_metric=="loss")
+    output = output[0]
 
     predictions = output.argmax(dim=-1).view(-1)
     correct = predictions.eq(labels.view(-1)).float()
