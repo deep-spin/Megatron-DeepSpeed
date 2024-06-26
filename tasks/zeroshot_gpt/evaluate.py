@@ -339,8 +339,8 @@ def evaluate_and_print_results(task, data_loader, model, eval_metric):
             string += 'avg accuracy: {:.4E}'.format(acc)
 
             results = {
-                "accuracy": acc,
-                "n_correct": output,
+                "accuracy": acc.item(),
+                "n_correct": output.item(),
                 "n_tokens": num_tokenized_tokens
             }
             with open('./eval_results', 'w') as json_file:
