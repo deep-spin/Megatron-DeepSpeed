@@ -70,7 +70,9 @@ def get_tasks_args(parser):
     group.add_argument('--val-av-rank-other-neg', type=int, default=30,
                         help='Av.rank validation: how many other negatives to'
                         ' take from each question pool')
-
+    group.add_argument('--eval-metric', default=None,
+                       help='Eval metric to use other than a task-specific'
+                       'default')
 
     return parser
 
@@ -79,7 +81,7 @@ if __name__ == '__main__':
 
     initialize_megatron(extra_args_provider=get_tasks_args)
 
-    args = get_args()
+    args = get_args()  # will the task args be included here?
 
     if args.num_layers_per_virtual_pipeline_stage is not None:
         print("Interleaved pipeline schedule is not yet supported for downstream tasks.")

@@ -3,8 +3,11 @@
 """GPT zero-shot evaluation."""
 
 import math
+from functools import partial
 
 import torch
+
+import entmax
 
 from megatron import get_args
 from megatron import print_rank_0, is_last_rank
@@ -53,7 +56,7 @@ def get_model_provider(eval_metric):
                                       'is not supported.'.format(eval_metric))
 
         print_rank_0('building GPT model ...')
-        
+
         args = get_args()
         config = core_transformer_config_from_args(args)
         if args.deepspeed:
@@ -62,7 +65,7 @@ def get_model_provider(eval_metric):
                                     config_dict_or_path=args.deepspeed_config,
                                     enabled=args.zero_stage == 3,
                                     mpu=mpu):
-            
+
                 model = GPTModel(
                     config=config,
                     num_tokentypes=0,
@@ -73,7 +76,7 @@ def get_model_provider(eval_metric):
         else:
             model = GPTModel(config=config, num_tokentypes=0, parallel_output=parallel_output,
                          pre_process=pre_process, post_process=post_process)
-                
+
 
         return model
 
@@ -99,6 +102,88 @@ def process_batch(batch):
         args.eod_mask_loss)
 
     return tokens, labels, attention_mask, position_ids, loss_mask
+
+"""
+if loss_function == "cross_entropy":
+    # cross entropy
+    # [b s] => [s b]
+    labels = labels.transpose(0,1).contiguous()
+    cross_entropy = sequence_parallel.vocab_sequence_parallel_cross_entropy if mpu.get_sequence_parallel_world_size() > 1 \
+        else tensor_parallel.vocab_parallel_cross_entropy
+    if fp16_lm_cross_entropy:
+        assert output.dtype == torch.half
+        loss = cross_entropy(output, labels)
+    else:
+        loss = cross_entropy(output.float(), labels)
+
+    # [s b] => [b, s]
+    loss = loss.transpose(0,1).contiguous()
+    support = None
+else:
+    # now: the loss function is "entmax15", "sparsemax", or "entmax_bisect"
+    loss_funcs = {
+        "entmax15": partial(entmax.entmax15_loss, k=topk, return_support_size=True),
+        "sparsemax": partial(entmax.sparsemax_loss, k=topk, return_support_size=True),
+        "entmax_bisect": partial(entmax.entmax_bisect_loss, alpha=alpha, n_iter=n_iter)
+    }
+    f = loss_funcs[loss_function]
+    b, s = labels.size()
+    output = output.transpose(0, 1).contiguous()
+    vocab_size = output.size(-1)
+    if loss_function != "entmax_bisect":
+        loss, support = f(output.float().view(-1, vocab_size), labels.view(-1))
+    else:
+        loss = f(output.float().view(-1, vocab_size), labels.view(-1))
+        support = None
+    loss = loss.view(b, s)
+
+"""
+
+
+def _compute_loss(output, labels, loss_mask, loss_function="cross_entropy", topk=512, alpha=1.5, n_iter=30):
+    """
+    Dimensions are confusing but I think I've figured it out. Based on
+    process_batch (defined above) and forward_step, labels is [b s]. I assume
+    loss_mask is the same shape. And I assume that output is [b s V] (it would
+    be ridiculously confusing otherwise).
+
+    Based on the documentation of tensor_parallel.vocab_parallel_cross_entropy,
+    we can expect output (or rather, output[0], which should be the decoder
+    output based on TransformerLanguageModel.forward) to be [s b V] and labels
+    to be [s b].
+    """
+    print("output type before _compute_loss", type(output))
+    if isinstance(output, torch.Tensor):
+        print("size before indexing", output.size())
+    output = output[0]  # based on how loss was previously computed
+    print("size after indexing", output.size())
+
+    if loss_function == "cross_entropy":
+        # I believe (based on the commented-out block above) that this
+        # function takes [s b] as its input.
+        # But I'm not certain
+        losses = tensor_parallel.vocab_parallel_cross_entropy(
+            output.contiguous().float(), labels.contiguous())
+    else:
+        # now: the loss function is "entmax15", "sparsemax", or "entmax_bisect"
+        loss_funcs = {
+            "entmax15": partial(entmax.entmax15_loss, k=topk, return_support_size=True),
+            "sparsemax": partial(entmax.sparsemax_loss, k=topk, return_support_size=True),
+            "entmax_bisect": partial(entmax.entmax_bisect_loss, alpha=alpha, n_iter=n_iter)
+        }
+        f = loss_funcs[loss_function]
+        print("labels size: ", labels.size())
+        print("output size", output.size())
+        vocab_size = output[0].size(-1)
+        if loss_function != "entmax_bisect":
+            losses, _ = f(output.float().view(-1, vocab_size), labels.view(-1))
+        else:
+            losses = f(output.float().view(-1, vocab_size), labels.view(-1))
+        # losses = losses.view(b, s)
+
+    loss = torch.sum(losses.view(-1) * loss_mask.contiguous().view(-1).float())
+
+    return loss
 
 
 def forward_step(batch, model, eval_metric):
@@ -126,10 +211,18 @@ def forward_step(batch, model, eval_metric):
     if parallel_state.is_pipeline_last_stage():
         # For loss, return the unreduced loss.
         if eval_metric == 'loss':
+            '''
             losses = tensor_parallel.vocab_parallel_cross_entropy(
                 output[0].contiguous().float(), labels.contiguous())
             loss = torch.sum(
                 losses.view(-1) * loss_mask.contiguous().view(-1).float())
+            return loss
+            '''
+
+            loss = _compute_loss(
+                output, labels, loss_mask,
+                loss_function=args.loss_function, topk=args.entmax_topk, n_iter=args.entmax_n_iter, alpha=args.entmax_alpha
+            )
             return loss
 
         # For accuracy, return the number of correctly predicted samples.
@@ -225,7 +318,9 @@ def main():
         print("Interleaved pipeline schedule is not yet supported for text generation.")
         exit()
 
-    if args.task == 'LAMBADA':
+    if args.eval_metric is not None:
+        eval_metric = args.eval_metric
+    elif args.task == 'LAMBADA':
         eval_metric = 'accuracy'
     elif args.task == 'WIKITEXT103':
         eval_metric = 'loss'
@@ -248,7 +343,7 @@ def main():
                 mpu=mpu if args.no_pipeline_parallel else None
             )
         model = [model]
-    
+
     if args.load is not None:
         _ = load_checkpoint(model, None, None, load_iteration=args.load_iteration)
 
@@ -262,7 +357,7 @@ def main():
 
     # Run evaluation.
     evaluate_and_print_results(args.task, dataloader, model, eval_metric)
-    
+
 
     print_rank_0('done :-)')
 
