@@ -169,7 +169,7 @@ class GPTModel(MegatronModule):
             inference_params=inference_params)
 
         if self.post_process:
-            lm_output, support_size = post_language_model_processing(
+            post_lm_out = post_language_model_processing(
                 lm_output, labels,
                 self.language_model.output_layer.weight if self.untie_embeddings_and_output_weights else self.shared_embedding_or_output_weight(),
                 self.parallel_output,
@@ -179,6 +179,10 @@ class GPTModel(MegatronModule):
                 self.entmax_topk,
                 self.entmax_n_iter,
                 return_support_size=True)
+            if labels is not None:
+                lm_output, support_size = post_lm_out
+            else:
+                lm_output = post_lm_out
         # now...what do do about support_size?
         if return_support_size:
             return lm_output, moe_losses if self.return_moe_loss else lm_output, support_size
