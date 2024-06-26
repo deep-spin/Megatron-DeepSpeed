@@ -481,7 +481,7 @@ def core_transformer_config_from_args(args):
         kw_args['bias_gelu_fusion'] = False
     if args.init_method_xavier_uniform:
         kw_args['init_method'] = torch.nn.init.xavier_uniform_
-        kw_args['scaled_init_method'] = torch.nn.init.xavier_uniform_
+        kw_args['output_layer_init_method'] = torch.nn.init.xavier_uniform_
 
     return TransformerConfig(**kw_args)
 
