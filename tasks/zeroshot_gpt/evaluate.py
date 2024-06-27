@@ -47,7 +47,7 @@ def get_model_provider(eval_metric):
 
         config = core_transformer_config_from_args(get_args())
 
-        if eval_metric == 'loss' or eval_metric == 'force_decoded_accuracy':
+        if eval_metric in {"loss", "force_decoded_accuracy", "force_decoded_accuracy_at_k"}:
             parallel_output = True
         elif eval_metric == 'accuracy':
             parallel_output = False
