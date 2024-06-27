@@ -357,6 +357,9 @@ def evaluate_and_print_results(task, data_loader, model, eval_metric):
             string += 'number correct: {:.4E} | '.format(output)
             string += 'total examples: {:.4E} | '.format(num_examples)
             string += 'avg accuracy: {:.4E}'.format(acc)
+            results = {"accuracy": acc.item()}
+            with open('./eval_results', 'w') as json_file:
+                json.dump(results, json_file)
 
         elif eval_metric == "force_decoded_accuracy" or eval_metric == "force_decoded_accuracy_at_k":
             num_tokenized_tokens = data_loader.dataset.num_tokenized_tokens
