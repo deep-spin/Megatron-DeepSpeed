@@ -195,11 +195,6 @@ def _force_decoded_accuracy(output, labels, loss_mask):
     process_batch (defined above) and forward_step, labels is [b s]. I assume
     loss_mask is the same shape. And I assume that output is [b s V] (it would
     be ridiculously confusing otherwise).
-
-    Based on the documentation of tensor_parallel.vocab_parallel_cross_entropy,
-    we can expect output (or rather, output[0], which should be the decoder
-    output based on TransformerLanguageModel.forward) to be [s b V] and labels
-    to be [s b].
     """
 
     # the raw output is a tuple (same as for eval_metric=="loss")
@@ -207,6 +202,31 @@ def _force_decoded_accuracy(output, labels, loss_mask):
 
     predictions = output.argmax(dim=-1).view(-1)
     correct = predictions.eq(labels.view(-1)).float()
+
+    correct_sum = torch.sum(correct * loss_mask.contiguous().view(-1).float())
+    return correct_sum
+
+
+def _force_decoded_accuracy_at_k(output, labels, loss_mask, k):
+    """
+    Accuracy at k -- do any of the top k outputs match?
+
+    This is different from LAMBADA accuracy, which is only about getting the
+    final word right based on a long context.
+
+    Dimensions are confusing but I think I've figured it out. Based on
+    process_batch (defined above) and forward_step, labels is [b s]. I assume
+    loss_mask is the same shape. And I assume that output is [b s V] (it would
+    be ridiculously confusing otherwise).
+    """
+
+    # the raw output is a tuple (same as for eval_metric=="loss")
+    output = output[0]
+
+    _, predictions = torch.topk(output, k, dim=-1)
+    predictions = predictions.view(-1, k)
+
+    correct = predictions.eq(labels.view(-1, 1)).any(dim=-1).float()
 
     correct_sum = torch.sum(correct * loss_mask.contiguous().view(-1).float())
     return correct_sum
@@ -253,6 +273,11 @@ def forward_step(batch, model, eval_metric):
 
         if eval_metric == "force_decoded_accuracy":
             correct_sum = _force_decoded_accuracy(output, labels, loss_mask)
+            return correct_sum
+
+        if eval_metric == "force_decoded_accuracy_at_k":
+            k = args.acc_k
+            correct_sum = _force_decoded_accuracy_at_k(output, labels, loss_mask, k)
             return correct_sum
 
         # For accuracy, return the number of correctly predicted samples.
@@ -331,7 +356,7 @@ def evaluate_and_print_results(task, data_loader, model, eval_metric):
             string += 'total examples: {:.4E} | '.format(num_examples)
             string += 'avg accuracy: {:.4E}'.format(acc)
 
-        elif eval_metric == "force_decoded_accuracy":
+        elif eval_metric == "force_decoded_accuracy" or eval_metric == "force_decoded_accuracy_at_k":
             num_tokenized_tokens = data_loader.dataset.num_tokenized_tokens
             acc = output / (num_tokenized_tokens - 1)
             string += 'number correct: {:.4E} | '.format(output)

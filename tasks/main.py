@@ -73,6 +73,8 @@ def get_tasks_args(parser):
     group.add_argument('--eval-metric', default=None,
                        help='Eval metric to use other than a task-specific'
                        'default')
+    group.add_argument('--acc-k', default=5, type=int,
+                       help='k for force-decoded accuracy at k')
 
     return parser
 
