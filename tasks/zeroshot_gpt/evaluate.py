@@ -282,6 +282,8 @@ def forward_step(batch, model, eval_metric):
 
         # For accuracy, return the number of correctly predicted samples.
         if eval_metric == 'accuracy':
+            if isinstance(output, tuple):
+                output = output[0]  # not sure why this was necessary
             outputs = torch.argmax(output, -1)
             correct = (outputs == labels).float()
             correct[(1 - loss_mask).bool()] = 1
