@@ -81,11 +81,25 @@ def post_language_model_processing(lm_output, labels, logit_weights,
         b, s = labels.size()
         output = output.transpose(0, 1).contiguous()
         vocab_size = output.size(-1)
+
+        # currently entmax_bisect_loss always returns a None support size,
+        # which is not ideal. This is a stopgap until entmax_bisect_loss is
+        # fixed
+        loss = f(output.float().view(-1, vocab_size), labels.view(-1))
+        if isinstance(loss, tuple):
+            loss, support = loss
+        else:
+            support = None
+
+        # old version which breaks because entmax_bisect unexpectedly returned
+        # a tuple:
+        '''
         if loss_function != "entmax_bisect":
             loss, support = f(output.float().view(-1, vocab_size), labels.view(-1))
         else:
             loss = f(output.float().view(-1, vocab_size), labels.view(-1))
             support = None
+        '''
         loss = loss.view(b, s)
 
     if return_support_size:
