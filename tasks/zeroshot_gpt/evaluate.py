@@ -4,6 +4,7 @@
 
 import math
 from functools import partial
+from collections import defaultdict
 
 import torch
 
@@ -47,7 +48,7 @@ def get_model_provider(eval_metric):
 
         config = core_transformer_config_from_args(get_args())
 
-        if eval_metric in {"loss", "force_decoded_accuracy", "force_decoded_accuracy_at_k"}:
+        if eval_metric in {"loss", "force_decoded_accuracy", "force_decoded_accuracy_at_k", "sparsemax_score"}:
             parallel_output = True
         elif eval_metric == 'accuracy':
             parallel_output = False
@@ -232,8 +233,60 @@ def _force_decoded_accuracy_at_k(output, labels, loss_mask, k):
     return correct_sum
 
 
+def _gini_entropy(probs):
+    return probs * (1 - probs).sum(dim=-1) / 2
+
+
+def _sparsemax_score(output, labels, loss_mask, loss_function="cross_entropy", topk=512, alpha=1.5, n_iter=30):
+    # loss_function is really the generator function here
+
+    if isinstance(output, torch.Tensor):
+        print("size before indexing", output.size())
+    output = output[0]  # based on how loss was previously computed
+    vocab_size = output.size(-1)
+
+    output = output.view(-1, vocab_size)
+    labels = labels.view(-1)
+    loss_mask = loss_mask.contiguous().view(-1).float()
+
+    # you can get the accuracy almost for free, so you might as well
+    predictions = output.argmax(dim=-1)
+    correct = predictions.eq(labels).float()
+    correct_sum = torch.sum(correct * loss_mask)
+
+    gen_funcs = {
+        "cross_entropy": torch.softmax,
+        "entmax15": partial(entmax.entmax15, k=topk, return_support_size=True),
+        "sparsemax": partial(entmax.sparsemax, k=topk, return_support_size=True),
+        "entmax_bisect": partial(entmax.entmax_bisect, alpha=alpha, n_iter=n_iter)
+    }
+
+    f = gen_funcs[loss_function]
+
+    if loss_function not in {"cross_entropy", "entmax_bisect"}:
+        probs, support_size = f(output.float(), dim=-1)
+    else:
+        probs = f(output.float(), dim=-1)
+        support_size = None
+
+    # now...p_theta(x)
+    # sp = p_theta(x) + H_2(p_theta)
+
+    gold_probs = probs.gather(1, labels.unsqueeze(1)).view(-1)
+    entropy = _gini_entropy(probs)
+    sp = ((gold_probs + entropy) * loss_mask).sum()
+
+    return sp, correct_sum
+
+
 def forward_step(batch, model, eval_metric):
     """Forward step."""
+    # TODO: return dict
+    eval_metrics = {"loss", "accuracy", "force_decoded_accuracy",
+                    "force_decoded_accuracy_at_k", "sparsemax_score"}
+    if eval_metric not in eval_metrics:
+        raise NotImplementedError('forward method for evaluation metric {} '
+                                  'is not implemented.'.format(eval_metric))
 
     # Get the batch.
     tokens, labels, attention_mask, position_ids, loss_mask = process_batch(
@@ -256,6 +309,9 @@ def forward_step(batch, model, eval_metric):
 
     if parallel_state.is_pipeline_last_stage():
         # For loss, return the unreduced loss.
+
+        scores = dict()
+
         if eval_metric == 'loss':
             '''
             losses = tensor_parallel.vocab_parallel_cross_entropy(
@@ -269,16 +325,25 @@ def forward_step(batch, model, eval_metric):
                 output, labels, loss_mask,
                 loss_function=args.loss_function, topk=args.entmax_topk, n_iter=args.entmax_n_iter, alpha=args.entmax_alpha
             )
-            return loss
+            scores["loss"] = loss
 
         if eval_metric == "force_decoded_accuracy":
             correct_sum = _force_decoded_accuracy(output, labels, loss_mask)
-            return correct_sum
+            scores["force_decoded_accuracy"] = correct_sum
 
         if eval_metric == "force_decoded_accuracy_at_k":
-            k = args.acc_k
-            correct_sum = _force_decoded_accuracy_at_k(output, labels, loss_mask, k)
-            return correct_sum
+            correct_sum = _force_decoded_accuracy_at_k(output, labels, loss_mask, args.acc_k)
+            scores["force_decoded_accuracy_at_k"] = correct_sum
+
+        if eval_metric == "sparsemax_score":
+            sp_sum, correct_sum = _sparsemax_score(
+                output, labels, loss_mask,
+                loss_function=args.loss_function, topk=args.entmax_topk, n_iter=args.entmax_n_iter, alpha=args.entmax_alpha
+            )
+            scores["sparsemax_score"] = sp_sum
+            scores["force_decoded_accuracy"] = correct_sum
+            # currently computes the accuracy but doesn't return it. annoying.
+            # return {"sparsemax_score": sp_sum, "force_decoded_accuracy": correct_sum}
 
         # For accuracy, return the number of correctly predicted samples.
         if eval_metric == 'accuracy':
@@ -288,10 +353,10 @@ def forward_step(batch, model, eval_metric):
             correct = (outputs == labels).float()
             correct[(1 - loss_mask).bool()] = 1
             correct = correct.prod(-1)
-            return correct.sum()
+            scores["accuracy"] = correct.sum()
 
-        raise NotImplementedError('forward method for evaluation metric {} '
-                                  'is not implemented.'.format(eval_metric))
+        return scores
+
     return None
 
 
@@ -302,21 +367,24 @@ def evaluate(data_loader, model, eval_metric):
     # Turn on evaluation mode which disables dropout.
     model.eval()
 
-    total_output = 0.0
+    total_output = defaultdict(float)
+
     with torch.no_grad():
         # For all the batches in the dataset.
         for iteration, batch in enumerate(data_loader):
             if iteration % args.log_interval == 0:
                 print_rank_0('> working on iteration: {}'.format(iteration))
             # Forward evaluation.
-            output = forward_step(batch, model, eval_metric)
+            output_dict = forward_step(batch, model, eval_metric)  # problem if this doesn't return a tensor
 
             # Reduce across processes.
             if parallel_state.is_pipeline_last_stage():
-                torch.distributed.all_reduce(output,
-                                             group=parallel_state.get_data_parallel_group())
-
-                total_output += output
+                for metric_name, output in output_dict.items():
+                    torch.distributed.all_reduce(
+                        output,
+                        group=parallel_state.get_data_parallel_group()
+                    )
+                    total_output[metric_name] += output
 
     return total_output
 
@@ -325,60 +393,61 @@ def evaluate_and_print_results(task, data_loader, model, eval_metric):
     """Evaluate and print results on screen."""
 
     # Evaluate and get results.
-    output = evaluate(data_loader, model, eval_metric)
+    output_dict = evaluate(data_loader, model, eval_metric)  # this is a dict
 
     string = ' validation results on {} | '.format(task)
     if is_last_rank():
-        if eval_metric == 'loss':
-            num_tokenized_tokens = data_loader.dataset.num_tokenized_tokens
-            num_original_tokens = data_loader.dataset.num_original_tokens
-            val_loss = output / (num_tokenized_tokens - 1)
-            ppl = math.exp(min(20, val_loss))
-            token_ratio = (num_tokenized_tokens - 1) / (num_original_tokens - 1)
-            adjusted_ppl = math.exp(min(20, val_loss * token_ratio))
-            string += 'avg loss: {:.4E} | '.format(val_loss)
-            string += 'ppl: {:.4E} | '.format(ppl)
-            string += 'adjusted ppl: {:.4E} | '.format(adjusted_ppl)
-            string += 'token ratio: {} |'.format(token_ratio)
+        results = dict()
 
-            results = {
-                "loss": val_loss.item(),
-                "ppl": ppl,
-                "ajusted_ppl": adjusted_ppl,
-                "token_ratio": token_ratio
-            }
+        num_tokenized_tokens = data_loader.dataset.num_tokenized_tokens
+        num_original_tokens = data_loader.dataset.num_original_tokens
+        num_examples = len(data_loader.dataset)
 
-            with open('./eval_results', 'w') as json_file:
-                json.dump(results, json_file)
+        results["n_tokens"] = num_tokenized_tokens
 
-        elif eval_metric == 'accuracy':
-            num_examples = len(data_loader.dataset)
-            acc = output / num_examples
-            string += 'number correct: {:.4E} | '.format(output)
-            string += 'total examples: {:.4E} | '.format(num_examples)
-            string += 'avg accuracy: {:.4E}'.format(acc)
-            results = {"accuracy": acc.item()}
-            with open('./eval_results', 'w') as json_file:
-                json.dump(results, json_file)
+        for eval_metric, output in output_dict.items():
+            if eval_metric == 'loss':
 
-        elif eval_metric == "force_decoded_accuracy" or eval_metric == "force_decoded_accuracy_at_k":
-            num_tokenized_tokens = data_loader.dataset.num_tokenized_tokens
-            acc = output / (num_tokenized_tokens - 1)
-            string += 'number correct: {:.4E} | '.format(output)
-            string += 'total tokens: {:.4E} | '.format(num_tokenized_tokens)
-            string += 'avg accuracy: {:.4E}'.format(acc)
+                val_loss = output / (num_tokenized_tokens - 1)
+                ppl = math.exp(min(20, val_loss))
+                token_ratio = (num_tokenized_tokens - 1) / (num_original_tokens - 1)
+                adjusted_ppl = math.exp(min(20, val_loss * token_ratio))
+                string += 'avg loss: {:.4E} | '.format(val_loss)
+                string += 'ppl: {:.4E} | '.format(ppl)
+                string += 'adjusted ppl: {:.4E} | '.format(adjusted_ppl)
+                string += 'token ratio: {} |'.format(token_ratio)
 
-            results = {
-                "accuracy": acc.item(),
-                "n_correct": output.item(),
-                "n_tokens": num_tokenized_tokens
-            }
-            with open('./eval_results', 'w') as json_file:
-                json.dump(results, json_file)
+                results["loss"] = val_loss.item()
+                results["ppl"] = ppl
+                results["adjusted_ppl"] = adjusted_ppl
+                results["token_ratio"] = token_ratio
 
-        else:
-            raise NotImplementedError('evaluation method for {} metric is not '
-                                      'implemented yet.'.format(eval_metric))
+            elif eval_metric == 'accuracy':
+                # remember this is Lambada accuracy
+                acc = output / num_examples
+                string += 'number correct: {:.4E} | '.format(output)
+                string += 'total examples: {:.4E} | '.format(num_examples)
+                string += 'avg accuracy: {:.4E}'.format(acc)
+                results["accuracy"] = acc.item()
+
+            elif eval_metric == "force_decoded_accuracy" or eval_metric == "force_decoded_accuracy_at_k":
+                acc = output / (num_tokenized_tokens - 1)
+                string += 'number correct: {:.4E} | '.format(output)
+                string += 'total tokens: {:.4E} | '.format(num_tokenized_tokens)
+                string += 'avg accuracy: {:.4E}'.format(acc)
+
+                results["accuracy"] = acc.item()
+                results["n_correct"] = output.item()
+            elif eval_metric == "sparsemax_score":
+                avg_sparsemax_score = output / (num_tokenized_tokens - 1)
+                string += 'sparsemax score: {:.4E} | '.format(avg_sparsemax_score)
+                results["sparsemax_score"] = avg_sparsemax_score
+            else:
+                raise NotImplementedError('evaluation method for {} metric is not '
+                                          'implemented yet.'.format(eval_metric))
+
+        with open('./eval_results', 'w') as json_file:
+            json.dump(results, json_file)
 
         length = len(string) + 1
         print('-' * length)
@@ -438,4 +507,3 @@ def main():
 
 
     print_rank_0('done :-)')
-
