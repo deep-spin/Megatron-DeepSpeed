@@ -441,7 +441,7 @@ def evaluate_and_print_results(task, data_loader, model, eval_metric):
             elif eval_metric == "sparsemax_score":
                 avg_sparsemax_score = output / (num_tokenized_tokens - 1)
                 string += 'sparsemax score: {:.4E} | '.format(avg_sparsemax_score)
-                results["sparsemax_score"] = avg_sparsemax_score
+                results["sparsemax_score"] = avg_sparsemax_score.item()
             else:
                 raise NotImplementedError('evaluation method for {} metric is not '
                                           'implemented yet.'.format(eval_metric))
