@@ -234,7 +234,7 @@ def _force_decoded_accuracy_at_k(output, labels, loss_mask, k):
 
 
 def _gini_entropy(probs):
-    return probs * (1 - probs).sum(dim=-1) / 2
+    return (probs * (1 - probs)).sum(dim=-1) / 2
 
 
 def _sparsemax_score(output, labels, loss_mask, loss_function="cross_entropy", topk=512, alpha=1.5, n_iter=30):
